@@ -1,0 +1,116 @@
+#!/usr/bin/env node
+'use strict';
+
+const path = require('path');
+const fs = require('fs');
+
+const ROOT = path.resolve(__dirname, '..');
+const NODE_MODULES_PATH = path.join(ROOT, 'node_modules');
+process.env.NODE_PATH = process.env.NODE_PATH
+  ? `${NODE_MODULES_PATH}:${process.env.NODE_PATH}`
+  : NODE_MODULES_PATH;
+require('module').Module._initPaths();
+
+const argv = process.argv.slice(2);
+const flags = { targetUrl: undefined, targetIndex: undefined, json: false };
+
+while (argv.length && argv[0].startsWith('-')) {
+  const flag = argv.shift();
+  if (flag === '-e' || flag === '--eval') {
+    flags.eval = argv.shift();
+    break;
+  }
+  if (flag === '--target-url') { flags.targetUrl = argv.shift(); continue; }
+  if (flag === '--target-index') { flags.targetIndex = Number(argv.shift()); continue; }
+  if (flag === '--json') { flags.json = true; continue; }
+  if (flag === '--help' || flag === '-h') { flags.help = true; break; }
+  console.error(`Unknown flag: ${flag}`);
+  process.exit(2);
+}
+
+if (!flags.eval && !argv.length) flags.help = true;
+
+if (flags.help) {
+  console.log(`
+gamba-exec — run Playwright code against your live Chrome
+
+Usage:
+  gamba-exec <script.js> [args...]
+  gamba-exec -e "<code>"
+
+Flags:
+  --target-url <text>    Use the tab whose URL contains this text
+  --target-index <n>     Use the tab at this zero-based index
+  --json                 Print a machine-readable { ok, result } envelope
+
+Scripts receive:
+  { page, context, browser, smartClick, smartFill, smartSelect,
+    uploadFile, getActiveModal, handleModal, inspectState,
+    explainDisabled, dismissAmbientModals, connectLive, args }
+
+Examples:
+  gamba-exec -e 'await page.goto("https://example.com"); return await page.title()'
+  gamba-exec -e 'await smartFill("Search", "playwright")' --target-url github.com
+`);
+  process.exit(0);
+}
+
+(async () => {
+  let result;
+  try {
+    const browserModule = require(path.join(ROOT, 'src', 'browser.js'));
+    const { page, context, browser, disconnect } = await browserModule.connectLive({
+      targetUrl: flags.targetUrl,
+      targetIndex: flags.targetIndex
+    });
+
+    const injected = {
+      page,
+      context,
+      browser,
+      args: argv.slice(),
+      connectLive: browserModule.connectLive,
+      smartClick: (target, opts) => page.smartClick(target, opts),
+      smartFill: (selector, value, opts) => page.smartFill(selector, value, opts),
+      smartSelect: (input, option, opts) => page.smartSelect(input, option, opts),
+      uploadFile: (trigger, file, opts) => page.uploadFile(trigger, file, opts),
+      getActiveModal: (clue) => page.getActiveModal(clue),
+      handleModal: (opts) => page.handleModal(opts),
+      inspectState: (opts) => page.inspectState(opts),
+      explainDisabled: (selector) => page.explainDisabled(selector),
+      dismissAmbientModals: (opts) => page.dismissAmbientModals(opts)
+    };
+
+    try {
+      if (flags.eval) {
+        const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+        const fn = new AsyncFunction(
+          '{ page, context, browser, args, connectLive, smartClick, smartFill, smartSelect, uploadFile, getActiveModal, handleModal, inspectState, explainDisabled, dismissAmbientModals }',
+          flags.eval
+        );
+        result = await fn(injected);
+      } else {
+        const scriptPath = path.resolve(process.cwd(), argv.shift());
+        if (!fs.existsSync(scriptPath)) throw new Error(`Script not found: ${scriptPath}`);
+        const script = require(scriptPath);
+        if (typeof script !== 'function') throw new Error(`${scriptPath} must export an async function`);
+        result = await script(injected);
+      }
+    } finally {
+      await disconnect();
+    }
+
+    if (flags.json) {
+      process.stdout.write(`${JSON.stringify({ ok: true, result })}\n`);
+    } else if (result !== undefined) {
+      console.log(result);
+    }
+  } catch (err) {
+    if (flags.json) {
+      process.stdout.write(`${JSON.stringify({ ok: false, error: err.message })}\n`);
+    } else {
+      console.error(`gamba-exec: ${err.message}`);
+    }
+    process.exit(1);
+  }
+})();

@@ -1,0 +1,11 @@
+node_modules/
+user_data/
+internal/
+screenshots/
+*.png
+*.jpg
+*.jpeg
+*.log
+.DS_Store
+.env
+.gamba-browser-profile/
